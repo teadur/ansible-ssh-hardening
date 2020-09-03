@@ -1,31 +1,45 @@
-# {{ansible_managed|comment}}
+#jinja2: trim_blocks: "true", lstrip_blocks: "true"
+{{ ansible_managed | comment }}
 
 # This is the ssh client system-wide configuration file.
 # See sshd_config(5) for more information on any settings used. Comments will be added only to clarify why a configuration was chosen.
 
+{% if sshd_custom_options %}
+# Custom configuration that overwrites default configuration
+# ==========================================================
+{% for line in sshd_custom_options %}
+{{ line }}
+{% endfor %}
+{% endif %}
+
 # Basic configuration
 # ===================
 
-# Either disable or only allowssh root login via certificates.
-PermitRootLogin {{ 'without-password' if (ssh_allow_root_with_key|bool) else 'no' }}
+# Either disable or only allow root login via certificates.
+PermitRootLogin {{ ssh_permit_root_login }}
 
 # Define which port sshd should listen to. Default to `22`.
-{% for port in ssh_server_ports -%}
-Port {{port}}
+{% for port in ssh_server_ports %}
+Port {{ port }}
 {% endfor %}
 
 # Address family should always be limited to the active network configuration.
 AddressFamily {{ 'any' if (network_ipv6_enable|bool) else 'inet' }}
 
 # Define which addresses sshd should listen to. Default to `0.0.0.0`, ie make sure you put your desired address in here, since otherwise sshd will listen to everyone.
-{% for address in ssh_listen_to -%}
-ListenAddress {{address}}
+{% for address in ssh_listen_to %}
+ListenAddress {{ address }}
 {% endfor %}
 
 # List HostKeys here.
-{% for key in ssh_host_key_files -%}
-HostKey {{key}}          # Req 20
+{% for key in ssh_host_key_files %}
+HostKey {{ key }}
 {% endfor %}
+
+# Specifies the host key algorithms that the server offers.
+{% if sshd_version is version('5.8', '>=') %}
+{{ "HostKeyAlgorithms " ~ ssh_host_key_algorithms|join(',') if ssh_host_key_algorithms else "HostKeyAlgorithms"|comment }}
+{% endif %}
 
 # Security configuration
 # ======================
@@ -34,11 +48,11 @@ HostKey {{key}}          # Req 20
 Protocol 2
 
 # Make sure sshd checks file modes and ownership before accepting logins. This prevents accidental misconfiguration.
-StrictModes yes
+StrictModes {{ 'yes' if (sshd_strict_modes|bool) else 'no' }}
 
 # Logging, obsoletes QuietMode and FascistLogging
-SyslogFacility AUTH
-LogLevel VERBOSE
+SyslogFacility {{ sshd_syslog_facility }}
+LogLevel {{ sshd_log_level }}
 
 # Cryptography
 # ------------
@@ -49,16 +63,16 @@ LogLevel VERBOSE
 # -- see: (http://net-ssh.github.com/net-ssh/classes/Net/SSH/Transport/CipherFactory.html)
 #
 
-{# This outputs "Ciphers <list-of-ciphers>" if ssh_ciphers is defined or "#Ciphers" if ssh_ciphers is undefined #}
-{{ "Ciphers "+ssh_ciphers| join(',') if ssh_ciphers else "Ciphers"|comment }}
+{# This outputs 'Ciphers <list-of-ciphers>' if ssh_ciphers is defined or '#Ciphers' if ssh_ciphers is undefined #}
+{{ 'Ciphers ' ~ ssh_ciphers|join(',') if ssh_ciphers else 'Ciphers'|comment }}
 
 # **Hash algorithms** -- Make sure not to use SHA1 for hashing, unless it is really necessary.
 # Weak HMAC is sometimes required if older package versions are used
 # eg Ruby's Net::SSH at around 2.2.* doesn't support sha2 for hmac, so this will have to be set true in this case.
 #
 
-{# This outputs "MACs <list-of-macs>" if ssh_macs is defined or "#MACs" if ssh_macs is undefined #}
-{{ "MACs "+ssh_macs| join(',') if ssh_macs else "MACs"|comment }}
+{# This outputs 'MACs <list-of-macs>' if ssh_macs is defined or '#MACs' if ssh_macs is undefined #}
+{{ 'MACs ' ~ ssh_macs|join(',') if ssh_macs else 'MACs'|comment }}
 
 # Alternative setting, if OpenSSH version is below v5.9
 #MACs hmac-ripemd160
@@ -68,21 +82,28 @@ LogLevel VERBOSE
 # eg ruby's Net::SSH at around 2.2.* doesn't support sha2 for kex, so this will have to be set true in this case.
 # based on: https://bettercrypto.org/static/applied-crypto-hardening.pdf
 
-{# This outputs "KexAlgorithms <list-of-algos>" if ssh_kex is defined or "#KexAlgorithms" if ssh_kex is undefined #}
-{{ "KexAlgorithms "+ssh_kex| join(',') if ssh_kex else "KexAlgorithms"|comment }}
+{# This outputs 'KexAlgorithms <list-of-algos>' if ssh_kex is defined or '#KexAlgorithms' if ssh_kex is undefined #}
+{{ 'KexAlgorithms ' ~ ssh_kex|join(',') if ssh_kex else 'KexAlgorithms'|comment }}
 
 # Authentication
 # --------------
 
 # Secure Login directives.
-{% if sshd_version.stdout | float  < 7.5 -%}
-UsePrivilegeSeparation {% if (ansible_distribution == 'Debian' and ansible_distribution_major_version <= '6') or (ansible_os_family in ['Oracle Linux', 'RedHat'] and ansible_distribution_major_version <= '6') -%}{{ssh_ps53}}{% else %}{{ssh_ps59}}{% endif %}
+{% if sshd_version is version('7.4', '<') %}
+UseLogin no
+{% endif %}
+{% if sshd_version is version('7.5', '<') %}
+UsePrivilegeSeparation {{
+  (ansible_facts.distribution == 'Debian' and ansible_facts.distribution_major_version <= '6')
+  or (ansible_facts.os_family in ['Oracle Linux', 'RedHat'] and ansible_facts.distribution_major_version <= '6' and not ansible_facts.distribution == 'Amazon')
+  | ternary(ssh_ps53, ssh_ps59)
+}}
 {% endif %}
 
-LoginGraceTime 30s
-MaxAuthTries {{ssh_max_auth_retries}}
-MaxSessions 10
-MaxStartups {{ssh_max_startups}}
+LoginGraceTime {{ ssh_login_grace_time }}
+MaxAuthTries {{ ssh_max_auth_retries }}
+MaxSessions {{ ssh_max_sessions }}
+MaxStartups {{ ssh_max_startups }}
 
 # Enable public key authentication
 PubkeyAuthentication yes
@@ -93,17 +114,14 @@ IgnoreUserKnownHosts yes
 HostbasedAuthentication no
 
 # Enable PAM to enforce system wide rules
-{% if ssh_pam_support -%}
+{% if ssh_pam_support %}
 UsePAM {{ 'yes' if (ssh_use_pam|bool) else 'no' }}
 {% endif %}
-{% if ssh_google_auth %}
-# Force public key auth then ask for google auth code
-AuthenticationMethods publickey,keyboard-interactive
-{% endif %}
 
-# Force public key auth then ask for pam device input
-{% if ssh_pam_device %}
-AuthenticationMethods publickey,keyboard-interactive:pam
+# Set AuthenticationMethods per default to publickey
+# AuthenticationMethods was introduced in OpenSSH 6.2 - https://www.openssh.com/txt/release-6.2
+{% if sshd_version is version('6.2', '>=') %}
+AuthenticationMethods {{ sshd_authenticationmethods }}
 {% endif %}
 
 # Disable password-based authentication, it can allow for potentially easier brute-force attacks.
@@ -111,7 +129,7 @@ PasswordAuthentication {{ 'yes' if (ssh_server_password_login|bool) else 'no' }}
 PermitEmptyPasswords no
 ChallengeResponseAuthentication {{ 'yes' if (ssh_challengeresponseauthentication|bool) else 'no' }}
 
-{% if ssh_kerberos_support -%}
+{% if ssh_kerberos_support %}
 # Only enable Kerberos authentication if it is configured.
 KerberosAuthentication no
 KerberosOrLocalPasswd no
@@ -119,27 +137,25 @@ KerberosTicketCleanup yes
 #KerberosGetAFSToken no
 {% endif %}
 
-{% if ssh_gssapi_support -%}
 # Only enable GSSAPI authentication if it is configured.
-GSSAPIAuthentication no
+GSSAPIAuthentication {{ 'yes' if ssh_gssapi_support else 'no' }}
 GSSAPICleanupCredentials yes
-{% endif %}
 
 # In case you don't use PAM (`UsePAM no`), you can alternatively restrict users and groups here. For key-based authentication this is not necessary, since all keys must be explicitely enabled.
-{% if ssh_deny_users -%}
-DenyUsers {{ssh_deny_users}}
+{% if ssh_deny_users %}
+DenyUsers {{ ssh_deny_users }}
 {% endif %}
 
-{% if ssh_allow_users -%}
-AllowUsers {{ssh_allow_users}}
+{% if ssh_allow_users %}
+AllowUsers {{ ssh_allow_users }}
 {% endif %}
 
-{% if ssh_deny_groups -%}
-DenyGroups {{ssh_deny_groups}}
+{% if ssh_deny_groups %}
+DenyGroups {{ ssh_deny_groups }}
 {% endif %}
 
-{% if ssh_allow_groups -%}
-AllowGroups {{ssh_allow_groups}}
+{% if ssh_allow_groups %}
+AllowGroups {{ ssh_allow_groups }}
 {% endif %}
 
 {% if ssh_authorized_keys_file %}
@@ -148,9 +164,9 @@ AuthorizedKeysFile {{ ssh_authorized_keys_file }}
 
 {% if ssh_trusted_user_ca_keys_file %}
 TrustedUserCAKeys {{ ssh_trusted_user_ca_keys_file }}
-{%    if ssh_authorized_principals_file  %}
+{% if ssh_authorized_principals_file %}
 AuthorizedPrincipalsFile {{ ssh_authorized_principals_file }}
-{%     endif %}
+{% endif %}
 {% endif %}
 
 # Network
@@ -160,17 +176,21 @@ AuthorizedPrincipalsFile {{ ssh_authorized_principals_file }}
 TCPKeepAlive no
 
 # Manage `ClientAlive..` signals via interval and maximum count. This will periodically check up to a `..CountMax` number of times within `..Interval` timeframe, and abort the connection once these fail.
-ClientAliveInterval {{ssh_client_alive_interval}}
-ClientAliveCountMax {{ssh_client_alive_count}}
+ClientAliveInterval {{ ssh_client_alive_interval }}
+ClientAliveCountMax {{ ssh_client_alive_count }}
 
 # Disable tunneling
 PermitTunnel {{ 'yes' if (ssh_permit_tunnel|bool) else 'no' }}
 
 # Disable forwarding tcp connections.
 # no real advantage without denied shell access
-AllowTcpForwarding {{ 'yes' if (ssh_allow_tcp_forwarding|bool) else 'no' }}
+{% if sshd_version is version('6.2', '>=') %}
+AllowTcpForwarding {{ ssh_allow_tcp_forwarding if (ssh_allow_tcp_forwarding in ('yes', 'no', 'local', 'all')) else 'no' }}
+{% else %}
+AllowTcpForwarding {{ ssh_allow_tcp_forwarding if (ssh_allow_tcp_forwarding in ('yes', 'no')) else 'no' }}
+{% endif %}
 
-# Disable agent formwarding, since local agent could be accessed through forwarded connection.
+# Disable agent forwarding, since local agent could be accessed through forwarded connection.
 # no real advantage without denied shell access
 AllowAgentForwarding {{ 'yes' if (ssh_allow_agent_forwarding|bool) else 'no' }}
 
@@ -186,19 +206,16 @@ GatewayPorts no
 {% endif %}
 
 # Disable X11 forwarding, since local X11 display could be accessed through forwarded connection.
-X11Forwarding no
+X11Forwarding {{ 'yes' if (ssh_x11_forwarding|bool) else 'no' }}
 X11UseLocalhost yes
 
 # User environment configuration
 # ==============================
 
-{% if ssh_server_permit_environment_vars %}
-PermitUserEnvironment yes
-{% for item in ssh_server_permit_environment_vars %}
-AcceptEnv {{ item }}
-{% endfor %}
-{% else %}
-PermitUserEnvironment no
+PermitUserEnvironment {{ ssh_server_permit_environment_vars }}
+
+{% if ssh_server_accept_env_vars %}
+AcceptEnv {{ ssh_server_accept_env_vars }}
 {% endif %}
 
 # Misc. configuration
@@ -210,13 +227,13 @@ UseDNS {{ 'yes' if (ssh_use_dns|bool) else 'no' }}
 
 PrintMotd {{ 'yes' if (ssh_print_motd|bool) else 'no' }}
 
-{% if ansible_os_family != 'FreeBSD' %}
+{% if ansible_facts.os_family != 'FreeBSD' %}
 PrintLastLog {{ 'yes' if (ssh_print_last_log|bool) else 'no' }}
 {% endif %}
 
-Banner {{ '/etc/ssh/banner.txt' if (ssh_banner|bool) else 'none' }}
+Banner {{ ssh_banner_path if (ssh_banner|bool) else 'none' }}
 
-{% if ansible_os_family == 'Debian' %}
+{% if ansible_facts.os_family == 'Debian' %}
 DebianBanner {{ 'yes' if (ssh_print_debian_banner|bool) else 'no' }}
 {% endif %}
 
@@ -230,11 +247,11 @@ RevokedKeys /etc/ssh/revoked_keys
 # override default of no subsystems
 # Subsystem sftp /opt/app/openssh5/libexec/sftp-server
 
-Subsystem sftp internal-sftp -l INFO -f LOCAL6
+Subsystem sftp internal-sftp -l INFO -f LOCAL6 -u {{ sftp_umask }}
 
 # These lines must appear at the *end* of sshd_config
 Match Group sftponly
-    ForceCommand internal-sftp -l INFO -f LOCAL6
+    ForceCommand internal-sftp -l INFO -f LOCAL6 -u {{ sftp_umask }}
 {% if sftp_chroot %}
     ChrootDirectory {{ sftp_chroot_dir }}
 {% endif %}
@@ -244,24 +261,51 @@ Match Group sftponly
     PermitRootLogin no
     X11Forwarding no
 {% endif %}
+{% if ssh_server_match_address %}
 
+# Address matching configuration
+# ============================
+
+{% for item in ssh_server_match_address %}
+Match Address {{ item.address }}
+  {% for rule in item.rules %}
+    {{ rule | indent(4) }}
+  {% endfor %}
+{% endfor %}
+{% endif %}
 {% if ssh_server_match_group %}
+
 # Group matching configuration
 # ============================
 
 {% for item in ssh_server_match_group %}
 Match Group {{ item.group }}
-    {{ item.rules | indent(4) }}
+  {% for rule in item.rules %}
+    {{ rule | indent(4) }}
+  {% endfor %}
 {% endfor %}
 {% endif %}
-
-
 {% if ssh_server_match_user %}
+
 # User matching configuration
 # ===========================
 
 {% for item in ssh_server_match_user %}
 Match User {{ item.user }}
-    {{ item.rules | indent(4) }}
+  {% for rule in item.rules %}
+    {{ rule | indent(4) }}
+  {% endfor %}
+{% endfor %}
+{% endif %}
+{% if ssh_server_match_local_port %}
+
+# LocalPort matching configuration
+# ================================
+
+{% for item in ssh_server_match_local_port %}
+Match LocalPort {{ item.port }}
+  {% for rule in item.rules %}
+    {{ rule | indent(4) }}
+  {% endfor %}
 {% endfor %}
 {% endif %}
